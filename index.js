@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
+const render = require('./src/ui');
 
 console.log('Player is starting...');
 
@@ -38,15 +39,6 @@ function playSong(index) {
 // Tracks which row the arrow keys are currently pointing at
 let cursor = 0;
 
-// Redraws the whole list so only one highlighted row is ever shown
-function render() {
-  console.clear();
-  songs.forEach((song, index) => {
-    const prefix = index === cursor ? '> ' : '  ';
-    console.log(`${prefix}${index}: ${song}`);
-  });
-}
-
 // Raw mode delivers every keypress immediately instead of a whole line
 process.stdin.setRawMode(true);
 process.stdin.resume();
@@ -69,7 +61,7 @@ process.stdin.on('data', (key) => {
     }
   }
 
-  render();
+  render(songs, cursor);
 });
 
-render();
+render(songs, cursor);
