@@ -19,10 +19,6 @@ if (songs.length === 0) {
   process.exit(1);
 }
 
-songs.forEach((song, index) => {
-  console.log(`${index}: ${song}`);
-});
-
 // Holds the current afplay process so it can be stopped later
 let player;
 
@@ -39,8 +35,41 @@ function playSong(index) {
   console.log(`Playing: ${songs[index]}`);
 }
 
-// Listen for the user typing a song number and pressing Enter
-process.stdin.on('data', (data) => {
-  const index = Number(data.toString().trim());
-  playSong(index);
+// Tracks which row the arrow keys are currently pointing at
+let cursor = 0;
+
+// Redraws the whole list so only one highlighted row is ever shown
+function render() {
+  console.clear();
+  songs.forEach((song, index) => {
+    const prefix = index === cursor ? '> ' : '  ';
+    console.log(`${prefix}${index}: ${song}`);
+  });
+}
+
+// Raw mode delivers every keypress immediately instead of a whole line
+process.stdin.setRawMode(true);
+process.stdin.resume();
+
+process.stdin.on('data', (key) => {
+  // Raw mode disables the default Ctrl+C exit, so handle it ourselves first
+  if (key[0] === 0x03) {
+    process.stdin.setRawMode(false);
+    process.exit(0);
+  }
+
+  // Arrow keys arrive as the 3 bytes 0x1b 0x5b <direction>
+  if (key[0] === 0x1b && key[1] === 0x5b) {
+    if (key[2] === 0x41) {
+      // Up: add the length first so (cursor - 1) can't go negative before the modulo
+      cursor = (cursor - 1 + songs.length) % songs.length;
+    } else if (key[2] === 0x42) {
+      // Down: modulo wraps past the last song back to the first
+      cursor = (cursor + 1) % songs.length;
+    }
+  }
+
+  render();
 });
+
+render();
