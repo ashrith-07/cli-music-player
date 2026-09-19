@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
-const { spawn } = require('child_process');
 const render = require('./src/ui');
+const { play, pause, resume, stop, hasVlc } = require('./src/player');
 
 console.log('Player is starting...');
 
@@ -20,24 +20,35 @@ if (songs.length === 0) {
   process.exit(1);
 }
 
-// Holds the current afplay process so it can be stopped later
-let player;
-
-function playSong(index) {
-  // Reject decimals/NaN so a bad index doesn't reach the array lookup
-  if (!Number.isInteger(index) || !songs[index]) {
-    console.log('No song at that number');
-    return;
-  }
-
-  const songPath = path.join(songsDir, songs[index]);
-  // afplay is the built-in macOS command line audio player
-  player = spawn('afplay', [songPath]);
-  console.log(`Playing: ${songs[index]}`);
-}
-
 // Tracks which row the arrow keys are currently pointing at
 let cursor = 0;
+
+// Playback state is separate from cursor, since browsing the list shouldn't
+// stop whatever is currently playing
+let player = null;
+let playingIndex = null;
+let isPaused = false;
+
+function stopPlayback() {
+  if (player) {
+    stop(player);
+  }
+  player = null;
+  playingIndex = null;
+  isPaused = false;
+}
+
+function togglePause() {
+  // Nothing is playing yet, so there's nothing to pause/resume
+  if (!player) return;
+
+  if (isPaused) {
+    resume(player);
+  } else {
+    pause(player);
+  }
+  isPaused = !isPaused;
+}
 
 // Guards against running the terminal restore twice (e.g. exit fires after
 // the Ctrl+C handler already cleaned up)
@@ -97,7 +108,33 @@ process.stdin.on('data', (key) => {
     }
   }
 
-  render(songs, cursor);
+  // Enter always starts fresh: stop whatever is playing, then play the song
+  // currently under the cursor
+  if (key[0] === 0x0d) {
+    stopPlayback();
+    player = play(path.join(songsDir, songs[cursor]));
+    playingIndex = cursor;
+    player.on('error', () => {
+      // e.g. the backend binary couldn't be spawned - drop back to an idle
+      // state instead of taking the whole player down with it
+      player = null;
+      playingIndex = null;
+      isPaused = false;
+      render(songs, cursor, playingIndex, isPaused, hasVlc);
+    });
+  }
+
+  // Space toggles pause/resume on whatever is currently playing
+  if (key[0] === 0x20) {
+    togglePause();
+  }
+
+  // 's' stops playback outright
+  if (key[0] === 0x73) {
+    stopPlayback();
+  }
+
+  render(songs, cursor, playingIndex, isPaused, hasVlc);
 });
 
-render(songs, cursor);
+render(songs, cursor, playingIndex, isPaused, hasVlc);
