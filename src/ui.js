@@ -3,8 +3,9 @@ process.stdout.write('\x1B[?25l');
 
 // Redraws the whole list in place instead of clearing the screen, so the
 // terminal doesn't flicker on every keypress
-function render(songs, cursor, playingIndex, isPaused, hasVlc) {
-  const backendLine = `Backend: ${hasVlc ? 'VLC' : 'afplay'}`;
+function render(songs, cursor, playingIndex, isPaused, hasVlc, repeatMode, shuffle) {
+  const backend = hasVlc ? 'VLC' : 'afplay';
+  const statusLine = `Backend: ${backend} | Repeat: ${repeatMode} | Shuffle: ${shuffle ? 'on' : 'off'}`;
 
   const songLines = songs.map((song, index) => {
     let text = `${index}: ${song}`;
@@ -16,7 +17,7 @@ function render(songs, cursor, playingIndex, isPaused, hasVlc) {
     return `\r\x1B[0K${row}\r\n`;
   });
 
-  const lines = [`\r\x1B[0K${backendLine}\r\n`, ...songLines];
+  const lines = [`\r\x1B[0K${statusLine}\r\n`, ...songLines];
 
   // \x1B[H moves the cursor home first, then one write draws the whole frame
   process.stdout.write(`\x1B[H${lines.join('')}`);

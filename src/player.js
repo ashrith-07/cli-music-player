@@ -10,11 +10,15 @@ function play(songPath) {
   if (hasVlc) {
     // --intf rc opens a text-command interface on stdin so pause/stop can
     // talk to VLC; --play-and-exit quits VLC when the song ends so our
-    // 'exit'/'error' handlers fire; stdio keeps stdin open for commands
-    // while throwing away VLC's constant chatter on stdout/stderr
-    return spawn(VLC_PATH, ['--intf', 'rc', '--play-and-exit', songPath], {
-      stdio: ['pipe', 'ignore', 'ignore'],
+    // 'close' handler fires. stdout must stay piped (not 'ignore') - VLC's
+    // rc interface writes a reply after every command, and writing that to
+    // a fully closed stdout crashes VLC instead of just failing quietly, so
+    // we pipe it and immediately discard it ourselves.
+    const vlc = spawn(VLC_PATH, ['--intf', 'rc', '--play-and-exit', songPath], {
+      stdio: ['pipe', 'pipe', 'ignore'],
     });
+    vlc.stdout.on('data', () => {});
+    return vlc;
   }
 
   return spawn('afplay', [songPath]);
