@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { spawn } = require('child_process');
 const render = require('./src/ui');
 const { play, pause, resume, stop, hasVlc } = require('./src/player');
 
@@ -33,6 +34,61 @@ let isPaused = false;
 let repeatMode = 'off';
 let shuffle = false;
 
+// Seconds into the current song, and its total length once afinfo answers
+let elapsed = 0;
+let duration = null;
+
+// A short-lived message shown after a key that only VLC can act on
+let seekNotice = false;
+
+// Draws the current state - one place so every call site stays in sync as
+// that state keeps growing
+function draw() {
+  render(songs, cursor, playingIndex, isPaused, hasVlc, repeatMode, shuffle, elapsed, duration, seekNotice);
+}
+
+// Runs `afinfo` once per song and resolves its estimated duration in seconds
+function getDuration(songPath) {
+  return new Promise((resolve) => {
+    const afinfo = spawn('afinfo', [songPath]);
+    let output = '';
+
+    // afinfo's output can arrive split across several chunks, so only the
+    // full, joined text is safe to search
+    afinfo.stdout.on('data', (chunk) => {
+      output += chunk;
+    });
+
+    // Every path must resolve, or a failed/odd afinfo run leaves the promise
+    // (and whoever awaits it) hanging forever
+    afinfo.on('error', () => resolve(null));
+
+    afinfo.on('close', () => {
+      const match = output.match(/estimated duration: ([\d.]+) sec/);
+      resolve(match ? parseFloat(match[1]) : null);
+    });
+  });
+}
+
+// Holds the one live elapsed-time interval so starting a new song can never
+// leave an old one running alongside it
+let elapsedTimer = null;
+
+function startElapsedTimer() {
+  clearInterval(elapsedTimer);
+  elapsedTimer = setInterval(() => {
+    if (!isPaused) {
+      elapsed += 0.25;
+    }
+    draw();
+  }, 250);
+}
+
+function stopElapsedTimer() {
+  clearInterval(elapsedTimer);
+  elapsedTimer = null;
+}
+
 function stopPlayback() {
   if (player) {
     // VLC's "quit" command exits gracefully with no signal, same as a song
@@ -44,6 +100,9 @@ function stopPlayback() {
   player = null;
   playingIndex = null;
   isPaused = false;
+  elapsed = 0;
+  duration = null;
+  stopElapsedTimer();
 }
 
 function togglePause() {
@@ -84,17 +143,28 @@ function getNextIndex(current) {
 function playIndex(index) {
   stopPlayback();
 
-  const newPlayer = play(path.join(songsDir, songs[index]));
+  const songPath = path.join(songsDir, songs[index]);
+  const newPlayer = play(songPath);
   player = newPlayer;
   playingIndex = index;
   cursor = index;
   isPaused = false;
+  startElapsedTimer();
+
+  getDuration(songPath).then((result) => {
+    // Ignore a stale answer if the user already moved on to another song
+    // while afinfo was still running
+    if (player !== newPlayer) return;
+    duration = result;
+    draw();
+  });
 
   newPlayer.on('error', () => {
     player = null;
     playingIndex = null;
     isPaused = false;
-    render(songs, cursor, playingIndex, isPaused, hasVlc, repeatMode, shuffle);
+    stopElapsedTimer();
+    draw();
   });
 
   newPlayer.on('close', (code, signal) => {
@@ -108,10 +178,11 @@ function playIndex(index) {
       player = null;
       playingIndex = null;
       isPaused = false;
+      stopElapsedTimer();
     } else {
       playIndex(nextIndex);
     }
-    render(songs, cursor, playingIndex, isPaused, hasVlc, repeatMode, shuffle);
+    draw();
   });
 }
 
@@ -162,6 +233,10 @@ process.stdin.on('data', (key) => {
     process.exit(0);
   }
 
+  // Cleared by default; the left/right branch below re-sets it when it
+  // actually applies, so it disappears again on the next keypress
+  seekNotice = false;
+
   // Arrow keys arrive as the 3 bytes 0x1b 0x5b <direction>
   if (key[0] === 0x1b && key[1] === 0x5b) {
     if (key[2] === 0x41) {
@@ -170,6 +245,18 @@ process.stdin.on('data', (key) => {
     } else if (key[2] === 0x42) {
       // Down: modulo wraps past the last song back to the first
       cursor = (cursor + 1) % songs.length;
+    } else if (key[2] === 0x44 || key[2] === 0x43) {
+      // Left/Right: seek 10s back/forward - only VLC's rc interface can do this
+      if (!hasVlc) {
+        seekNotice = true;
+      } else if (player && duration !== null) {
+        const step = key[2] === 0x43 ? 10 : -10;
+        // Clamp to the song's bounds - our elapsed counter can drift past
+        // afinfo's estimate, and seeking below 0 makes no sense
+        const target = Math.min(duration, Math.max(0, elapsed + step));
+        player.stdin.write(`seek ${Math.round(target)}\n`);
+        elapsed = target;
+      }
     }
   }
 
@@ -213,7 +300,7 @@ process.stdin.on('data', (key) => {
     shuffle = !shuffle;
   }
 
-  render(songs, cursor, playingIndex, isPaused, hasVlc, repeatMode, shuffle);
+  draw();
 });
 
-render(songs, cursor, playingIndex, isPaused, hasVlc, repeatMode, shuffle);
+draw();
