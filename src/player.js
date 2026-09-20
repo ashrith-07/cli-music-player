@@ -6,6 +6,7 @@ const VLC_PATH = '/Applications/VLC.app/Contents/MacOS/VLC';
 // Checked once at startup to decide which backend the rest of this module uses
 const hasVlc = fs.existsSync(VLC_PATH);
 
+// Starts playing a song, using VLC if it's installed, afplay otherwise
 function play(songPath) {
   if (hasVlc) {
     // --intf rc opens a text-command interface on stdin so pause/stop can
@@ -24,6 +25,7 @@ function play(songPath) {
   return spawn('afplay', [songPath]);
 }
 
+// Pauses a currently-playing song
 function pause(player) {
   if (hasVlc) {
     // rc's "pause" command toggles - only safe here because we only ever
@@ -37,6 +39,7 @@ function pause(player) {
   player.kill('SIGSTOP');
 }
 
+// Resumes a paused song
 function resume(player) {
   if (hasVlc) {
     // "play" (not the "pause" toggle) explicitly resumes regardless of
@@ -51,6 +54,7 @@ function resume(player) {
   player.kill('SIGCONT');
 }
 
+// Stops playback outright and ends the child process
 function stop(player) {
   if (hasVlc) {
     player.stdin.write('quit\n');

@@ -6,8 +6,55 @@ const { play, pause, resume, stop, hasVlc } = require('./src/player');
 
 console.log('Player is starting...');
 
+// Guards against running the terminal restore twice (e.g. exit fires after
+// the Ctrl+C handler already cleaned up)
+let cleaned = false;
+
+// Restores the terminal to normal (cursor visible, raw mode off)
+function cleanup() {
+  if (cleaned) return;
+  cleaned = true;
+
+  // Show the terminal cursor again since ui.js hid it as soon as it loaded
+  process.stdout.write('\x1B[?25h');
+
+  // Only a TTY was put into raw mode in the first place
+  if (process.stdin.isTTY) {
+    process.stdin.setRawMode(false);
+  }
+
+  // Leave the shell prompt on its own line instead of at the end of the list
+  process.stdout.write('\r\n');
+}
+
+// Stops whatever is playing and restores the terminal before leaving for
+// good. stopPlayback() and player are defined further down, but that's fine:
+// this function only runs later, once a quit key or signal actually arrives,
+// by which point the whole file has already finished loading.
+function quit() {
+  stopPlayback();
+  cleanup();
+  process.exit(0);
+}
+
+// Registered this early so every exit below - including the songs/ guards
+// that follow - restores the terminal cursor instead of leaving it hidden
+process.on('exit', cleanup);
+
+// SIGKILL can't be listened for at all - the OS force-kills the process
+// immediately without letting any JS run, so there's no hook to clean up on
+process.on('SIGINT', quit);
+process.on('SIGTERM', quit);
+
 // Songs live next to index.js so the player works from any cwd
 const songsDir = path.join(__dirname, 'songs');
+
+// readdirSync would throw a raw stack trace if the folder is simply missing
+// (e.g. a fresh clone before songs/ is created), so check for it first
+if (!fs.existsSync(songsDir)) {
+  console.error('songs/ folder not found - create it and add some .mp3 files');
+  process.exit(1);
+}
 
 // Case-insensitive match so .MP3 files are picked up too
 const songs = fs
@@ -38,13 +85,31 @@ let shuffle = false;
 let elapsed = 0;
 let duration = null;
 
-// A short-lived message shown after a key that only VLC can act on
-let seekNotice = false;
+// Shows a short message after a key that only VLC can act on
+let showSeekNotice = false;
+
+// Set when playback or a duration lookup fails, so the UI can say so instead
+// of just going quiet
+let playbackError = null;
+let durationUnavailable = false;
 
 // Draws the current state - one place so every call site stays in sync as
 // that state keeps growing
 function draw() {
-  render(songs, cursor, playingIndex, isPaused, hasVlc, repeatMode, shuffle, elapsed, duration, seekNotice);
+  render({
+    songs,
+    cursor,
+    playingIndex,
+    isPaused,
+    hasVlc,
+    repeatMode,
+    shuffle,
+    elapsed,
+    duration,
+    showSeekNotice,
+    playbackError,
+    durationUnavailable,
+  });
 }
 
 // Runs `afinfo` once per song and resolves its estimated duration in seconds
@@ -60,12 +125,14 @@ function getDuration(songPath) {
     });
 
     // Every path must resolve, or a failed/odd afinfo run leaves the promise
-    // (and whoever awaits it) hanging forever
-    afinfo.on('error', () => resolve(null));
+    // (and whoever awaits it) hanging forever. afinfo missing (e.g. not on
+    // PATH) lands here too, so the caller can tell "not found" apart from
+    // "found, but no duration in the output".
+    afinfo.on('error', () => resolve({ duration: null, error: true }));
 
     afinfo.on('close', () => {
       const match = output.match(/estimated duration: ([\d.]+) sec/);
-      resolve(match ? parseFloat(match[1]) : null);
+      resolve({ duration: match ? parseFloat(match[1]) : null, error: false });
     });
   });
 }
@@ -74,7 +141,10 @@ function getDuration(songPath) {
 // leave an old one running alongside it
 let elapsedTimer = null;
 
+// Starts ticking elapsed time for the song that just started playing
 function startElapsedTimer() {
+  // Clear any previous song's timer first - without this, every new song
+  // adds another interval running in parallel and elapsed speeds up
   clearInterval(elapsedTimer);
   elapsedTimer = setInterval(() => {
     if (!isPaused) {
@@ -84,11 +154,21 @@ function startElapsedTimer() {
   }, 250);
 }
 
+// Stops the elapsed-time interval, e.g. once playback stops entirely
 function stopElapsedTimer() {
   clearInterval(elapsedTimer);
   elapsedTimer = null;
 }
 
+// Clears playback state back to idle (nothing loaded or playing)
+function resetPlaybackState() {
+  player = null;
+  playingIndex = null;
+  isPaused = false;
+  stopElapsedTimer();
+}
+
+// Stops whatever is currently playing, if anything
 function stopPlayback() {
   if (player) {
     // VLC's "quit" command exits gracefully with no signal, same as a song
@@ -97,14 +177,13 @@ function stopPlayback() {
     player.stoppedByUser = true;
     stop(player);
   }
-  player = null;
-  playingIndex = null;
-  isPaused = false;
+  resetPlaybackState();
   elapsed = 0;
   duration = null;
-  stopElapsedTimer();
+  playbackError = null;
 }
 
+// Pauses if currently playing, resumes if currently paused
 function togglePause() {
   // Nothing is playing yet, so there's nothing to pause/resume
   if (!player) return;
@@ -140,6 +219,7 @@ function getNextIndex(current) {
   return null;
 }
 
+// Starts playing the song at the given index, replacing whatever was playing
 function playIndex(index) {
   stopPlayback();
 
@@ -151,19 +231,19 @@ function playIndex(index) {
   isPaused = false;
   startElapsedTimer();
 
-  getDuration(songPath).then((result) => {
+  getDuration(songPath).then((durationResult) => {
     // Ignore a stale answer if the user already moved on to another song
     // while afinfo was still running
     if (player !== newPlayer) return;
-    duration = result;
+    duration = durationResult.duration;
+    durationUnavailable = durationResult.error;
     draw();
   });
 
   newPlayer.on('error', () => {
-    player = null;
-    playingIndex = null;
-    isPaused = false;
-    stopElapsedTimer();
+    resetPlaybackState();
+    // e.g. neither VLC nor the afplay fallback could be spawned at all
+    playbackError = 'Playback failed - no audio backend available';
     draw();
   });
 
@@ -175,10 +255,7 @@ function playIndex(index) {
 
     const nextIndex = getNextIndex(index);
     if (nextIndex === null) {
-      player = null;
-      playingIndex = null;
-      isPaused = false;
-      stopElapsedTimer();
+      resetPlaybackState();
     } else {
       playIndex(nextIndex);
     }
@@ -186,56 +263,24 @@ function playIndex(index) {
   });
 }
 
-// Guards against running the terminal restore twice (e.g. exit fires after
-// the Ctrl+C handler already cleaned up)
-let cleaned = false;
-
-function cleanup() {
-  if (cleaned) return;
-  cleaned = true;
-
-  // Show the terminal cursor again since ui.js hid it on startup
-  process.stdout.write('\x1B[?25h');
-
-  // Only a TTY was put into raw mode in the first place
-  if (process.stdin.isTTY) {
-    process.stdin.setRawMode(false);
-  }
-
-  // Leave the shell prompt on its own line instead of at the end of the list
-  process.stdout.write('\r\n');
-}
-
-// 'exit' is a safety net that catches every way the process ends, including
-// a plain process.exit() call elsewhere in this file
-process.on('exit', cleanup);
-
-// SIGKILL can't be listened for at all - the OS force-kills the process
-// immediately without letting any JS run, so there's no hook to clean up on
-process.on('SIGINT', () => {
-  cleanup();
-  process.exit(0);
-});
-process.on('SIGTERM', () => {
-  cleanup();
-  process.exit(0);
-});
-
 // Raw mode delivers every keypress immediately instead of a whole line
 process.stdin.setRawMode(true);
 process.stdin.resume();
+
+// The box border and bar widths are fixed, so a resize doesn't reflow them -
+// but the terminal's own redraw can leave stale text behind, so just redraw
+process.stdout.on('resize', () => draw());
 
 process.stdin.on('data', (key) => {
   // Raw mode disables the default Ctrl+C exit, so handle it ourselves first.
   // "q" (0x71) is a second, more discoverable way to quit.
   if (key[0] === 0x03 || key[0] === 0x71) {
-    cleanup();
-    process.exit(0);
+    quit();
   }
 
   // Cleared by default; the left/right branch below re-sets it when it
   // actually applies, so it disappears again on the next keypress
-  seekNotice = false;
+  showSeekNotice = false;
 
   // Arrow keys arrive as the 3 bytes 0x1b 0x5b <direction>
   if (key[0] === 0x1b && key[1] === 0x5b) {
@@ -248,7 +293,7 @@ process.stdin.on('data', (key) => {
     } else if (key[2] === 0x44 || key[2] === 0x43) {
       // Left/Right: seek 10s back/forward - only VLC's rc interface can do this
       if (!hasVlc) {
-        seekNotice = true;
+        showSeekNotice = true;
       } else if (player && duration !== null) {
         const step = key[2] === 0x43 ? 10 : -10;
         // Clamp to the song's bounds - our elapsed counter can drift past
@@ -302,5 +347,10 @@ process.stdin.on('data', (key) => {
 
   draw();
 });
+
+// Wipe whatever the terminal was showing before (shell output, an update log)
+// exactly once, so it doesn't sit around the UI. Only here, never per frame -
+// clearing on every redraw is what caused the flicker.
+process.stdout.write('\x1B[2J');
 
 draw();
